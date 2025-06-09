@@ -22,7 +22,7 @@ class SanityConfig:
 """
 Train function: allows for lots of hyperparams, tokenize before 
 """
-def trainGPT(config, tokenizer, X, batch_size=128, epochs=500, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu'):
+def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu'):
     model = GPT(config)
     model.to(device)
     X = tokenizer(X, padding=True, truncation=True,return_tensors="pt")
@@ -62,11 +62,47 @@ def trainGPT(config, tokenizer, X, batch_size=128, epochs=500, lr=1e-3, weight_d
         print(f"Epoch {e}: Average loss: {avg_loss/ num_batches}")
 
     torch.save(model.state_dict(), 'GPT_weights.pth')
+    return model
 
 
-def inference(model, input_str):
-    model.eval()
-    all_predictions=[]
+def inference(model, tokenizer, input_str, max_new_tokens=50, device='cpu'):
+    with torch.no_grad():
+        model.to(device)
+        model.eval()
+
+        # Tokenize input
+        inputs = tokenizer(input_str, return_tensors='pt', padding=True, truncation=True)
+        input_ids = inputs['input_ids'].to(device)
+        attention_mask = inputs['attention_mask'].to(device)
+
+        generated = input_ids
+
+        for _ in range(max_new_tokens):
+            # Trim to block size if needed
+            if generated.size(1) > model.config.block_size:
+                generated = generated[:, -model.config.block_size:]
+                attention_mask = attention_mask[:, -model.config.block_size:]
+
+            # Get logits from model
+            logits = model(generated, attention_mask)
+            logits = logits[:, -1, :]  # Only take the last time step
+
+            # Get predicted next token (greedy)
+            next_token = torch.argmax(logits, dim=-1, keepdim=True)
+            print(tokenizer.decode([next_token.item()], skip_special_tokens=True))
+
+            # Append to generated sequence
+            generated = torch.cat((generated, next_token), dim=1)
+            attention_mask = torch.cat((attention_mask, torch.ones_like(next_token)), dim=1)
+
+            # Optionally stop at EOS
+            if next_token.item() == tokenizer.eos_token_id:
+                break
+
+    # Decode output
+    output_str = tokenizer.decode(generated[0], skip_special_tokens=True)
+    return output_str
+
 
 
 
@@ -79,4 +115,5 @@ tokenizer = AutoTokenizer.from_pretrained('gpt2')
 tokenizer.pad_token = tokenizer.eos_token 
 print("Starting Training... ")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-trainGPT(config, tokenizer, ["I love machine learning"], device=device)
+model = trainGPT(config, tokenizer, ["I love machine learning!<|endoftext|>"], device=device)
+print(inference(model, tokenizer, "I lo"))
