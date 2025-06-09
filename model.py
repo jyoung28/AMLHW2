@@ -44,7 +44,6 @@ class CausalSelfAttention(nn.Module):
         self.n_embd = config.n_embd
         self.dropout = config.dropout
 
-        self.attn_mask = config.mask
         # flash attention make GPU go brrrrr but support is only in PyTorch >= 2.0
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention')
         if not self.flash:
@@ -65,7 +64,29 @@ class CausalSelfAttention(nn.Module):
         # causal self-attention; Self-attend: (B, nh, T, hs) x (B, nh, hs, T) -> (B, nh, T, T)
         if self.flash:
             # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
+            if (attn_mask is not None):
+                attn_mask_bool = attn_mask.bool()
+                causal_mask = torch.tril(torch.ones(T, T, device=x.device, dtype=torch.bool))
+            
+                # Combine causal + padding: can only attend if both conditions are met
+                # Broadcasting: (B, T, T) = (B, T, 1) & (B, 1, T) & (T, T)
+                combined_mask = (
+                    attn_mask_bool.unsqueeze(-1) &  
+                    attn_mask_bool.unsqueeze(-2) &   
+                    causal_mask.unsqueeze(0)
+                )
+            
+                # Add head dimension: (B, 1, T, T) - will broadcast to (B, H, T, T)
+                flash_mask = combined_mask.unsqueeze(1)
+            
+                y = torch.nn.functional.scaled_dot_product_attention(
+                    q, k, v, 
+                    attn_mask=flash_mask, 
+                    dropout_p=self.dropout if self.training else 0, 
+                    is_causal=False  # We're providing our own mask
+                )
+            else:
+                y = torch.nn.functional.scaled_dot_product_attention(q, k, v, attn_mask=None, dropout_p=self.dropout if self.training else 0, is_causal=True)
         else:
             # manual implementation of attention
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
@@ -114,33 +135,34 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
     
-class CharTokenizer():
-    def __init__(self):
-        if (self.tokenize):
-            chars = string.printable # all english lettesr, chars and digits
-            self.char_to_tok = {ch: i + 1 for i, ch in enumerate(chars)} # do + 1 to have padding be 0
-            self.tok_to_char = {i: ch for ch, i in self.char_to_tok.items()}
+# class CharTokenizer():
+#     def __init__(self):
+#         chars = string.printable # all english lettesr, chars and digits
+#         self.char_to_tok = {ch: i + 1 for i, ch in enumerate(chars)} # do + 1 to have padding be 0
+#         self.tok_to_char = {i: ch for ch, i in self.char_to_tok.items()}
     
-    def encode(self, input):
-        T = 0
-        for l in input:
-            T = max(len(l), T)
+#     def encode(self, input):
+#         T = 0
+#         for l in input:
+#             T = max(len(l), T)
 
-        idx = torch.zeros((len(input), T))
-        for i in range(len(input)):
-            for j in range(len(input[i])):
-                idx[i,j] = self.char_to_tok[input[i][j]]
+#         idx = torch.zeros((len(input), T))
+#         attn_mask= torch.zeros((len(input), T))
+#         for i in range(len(input)):
+#             for j in range(len(input[i])):
+#                 idx[i,j] = self.char_to_tok[input[i][j]]
+#                 attn_mask[i,j] = 1
 
-        return idx
+#         return idx, 
 
-    def decode(self, output): # output is tensor of B x T
-        res = []
-        for l in output:
-            seq = []
-            for t in l:
-                seq.append(self.tok_to_char[t])
-            res.append(seq)
-        return res
+#     def decode(self, output): # output is tensor of B x T
+#         res = []
+#         for l in output:
+#             seq = []
+#             for t in l:
+#                 seq.append(self.tok_to_char[t])
+#             res.append(seq)
+#         return res
 
 @dataclass
 class GPTConfig:
@@ -151,7 +173,6 @@ class GPTConfig:
     n_embd: int = 768
     dropout: float = 0.0
     bias: bool = True # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    tokenizer = CharTokenizer() # TODO: add a tokenizer option
 
 class GPT(nn.Module):
 
@@ -209,11 +230,10 @@ class GPT(nn.Module):
 
 
     # idx is a tensor of tokens (B, T)
-    def forward(self, idx): 
+    def forward(self, idx, padding_mask=None): 
         device = idx.device
         b, t = idx.size()
 
-        attn_mask = (idx != 0).long() 
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
@@ -222,7 +242,7 @@ class GPT(nn.Module):
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
-            x = block(x, attn_mask)
+            x = block(x, padding_mask)
         x = self.transformer.ln_f(x)
 
         logits = self.lm_head(x)
