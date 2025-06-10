@@ -6,6 +6,7 @@ from model import GPT
 from transformers import AutoTokenizer
 import transformers
 from dataclasses import dataclass
+from tqdm import tqdm
 
 
 @dataclass
@@ -21,7 +22,7 @@ class SanityConfig:
 """
 Train function: allows for lots of hyperparams, tokenize before 
 """
-def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu', grokking=False, max_steps=None):
+def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu', grokking=False, max_steps=None, filename=""):
     model = GPT(config)
     model.to(device)
     mask_idxs = []
@@ -42,8 +43,11 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
     if (grokking):
         for idx in range(len(mask_idxs)):
             train_labels[idx, :mask_idxs[idx] + 1] = -100 # mask everything but the output
-
-    train_labels[Xtrain == tokenizer.pad_token] = -100 
+    # print(tokenizer.pad_token_id)
+    # print(tokenizer.pad_token)
+    # print(train_labels[Xtrain])
+    # print(Xtrain)
+    train_labels[Xtrain == tokenizer.pad_token_id] = -100 
 
     test_labels = None
     if (Xtest is not None):
@@ -62,21 +66,42 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
         if (len(test_mask_idxs) > 0):
             for idx in range(len(test_mask_idxs)):
                 test_labels[idx, :test_mask_idxs[idx] + 1] = -100
+        test_labels[Xtest == tokenizer.pad_token_id] = -100
         
 
     optimizer = model.configure_optimizers(weight_decay, lr, betas, device)
     num_batches = math.ceil(Xtrain.shape[0]/batch_size)
     steps = 0
-    
+    path = 'GPT_weights' + filename + '.pth'
+    train_accuracies = []
+    test_accuracies = []
+    all_train_loss = []
+    all_valid_loss = []
+
+    progress_bar = tqdm(total=max_steps, desc="Training Progress", dynamic_ncols=True)
     for e in range(epochs):
         avg_loss = 0
+        all_predictions = []
+        all_labels = []
+
+        indices = torch.randperm(Xtrain.shape[0])
+        Xtrain_shuffled = Xtrain[indices]
+        Xmasks_shuffled = Xmasks[indices]
+        train_labels_shuffled = train_labels[indices]
+        # batch_iterator = tqdm(range(num_batches), desc=f"Training (epoch {e+1})", leave=False)
         for i in range(num_batches):
-            xb = Xtrain[i*batch_size:(i+1)*batch_size].to(device)
-            xmb = Xmasks[i*batch_size:(i+1)*batch_size].to(device)
-            labels = train_labels[i*batch_size:(i+1)*batch_size].to(device)
+            xb = Xtrain_shuffled[i*batch_size:(i+1)*batch_size].to(device)
+            xmb = Xmasks_shuffled[i*batch_size:(i+1)*batch_size].to(device)
+            labels = train_labels_shuffled[i*batch_size:(i+1)*batch_size].to(device)
+
+            model.train()
 
             logits = model(xb, xmb)
             B, T, V = logits.shape
+
+            predictions = torch.argmax(logits, dim = -1)
+            all_predictions += [predictions]
+            all_labels += [labels]
             
             loss = F.cross_entropy(
                 logits.view(-1, V), 
@@ -86,42 +111,89 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
 
             optimizer.zero_grad()
             loss.backward()
+
             optimizer.step()
             avg_loss += loss.item()
             steps += 1
+
+            avg_loss_so_far = avg_loss / (i + 1)
+            # progress_bar.update(1)
+            # progress_bar.set_postfix_str(f"loss={avg_loss_so_far} | step={steps}")
+
             if (max_steps is not None and steps >= max_steps):
                 print("Reached Max Optimizer Steps")
-                torch.save(model.state_dict(), 'GPT_weights.pth')
+                torch.save(model.state_dict(), path)
                 return model
+            
+            # print(steps)
+            
 
-        if (e % 100 == 0 and Xtest is not None):
-                print(f"Epoch {e}: Average loss: {avg_loss/ num_batches}")
-                evaluate(model, Xtest, Xtestmasks, test_labels)
+        # if (e % 100 == 0 and Xtest is not None):
+        #         print(steps)
+        #         print(f"Epoch {e}: Average loss: {avg_loss/ num_batches}")
+        #         evaluate(model, Xtest, Xtestmasks, test_labels, batch_size = 8192, device=device)
 
-    torch.save(model.state_dict(), 'GPT_weights.pth')
-    return model
+        #compute train accuracy
+        all_predictions = torch.cat(all_predictions, dim = 0)
+        all_labels = torch.cat(all_labels, dim = 0)
+        train_accuracy = compute_accuracy(all_predictions, all_labels, grokking=grokking)
+        train_accuracies.append(train_accuracy)
+        all_train_loss.append(avg_loss/ num_batches)
 
-def evaluate(model,  Xtest, Xtestmasks, test_labels, test_batch_size=128, device='cpu'):
+        # evaluate at every epoch on test
+        if (Xtest is not None and len(test_labels) > 0 and steps % 100 == 0):
+            validation_loss, validation_accuracy = evaluate(model, Xtest, Xtestmasks, test_labels, test_batch_size = 8192, device=device, grokking=grokking)
+            test_accuracies.append(validation_accuracy)
+            all_valid_loss.append(validation_loss)
+            progress_bar.update(num_batches)
+            progress_bar.set_postfix_str(
+            f"loss={avg_loss / num_batches}, train_acc={train_accuracy}, "
+            f"val_loss={validation_loss}, val_acc={validation_accuracy}, step={steps}")
+
+
+
+    torch.save(model.state_dict(), path)
+    return model, train_accuracy, validation_loss, validation_accuracy
+
+def evaluate(model,  Xtest, Xtestmasks, test_labels, test_batch_size=128, device='cpu', grokking=False):
+    model.eval()
     with torch.no_grad():
-        model.eval()
         num_batches = math.ceil(Xtest.shape[0]/test_batch_size)
         total_loss = 0
-        for i in range(num_batches):
-            xb = Xtest[i*test_batch_size:(i+1)*test_batch_size].to(device)
-            xmb = Xtestmasks[i*test_batch_size:(i+1)*test_batch_size].to(device)
-            labels = test_labels[i*test_batch_size:(i+1)*test_batch_size].to(device)
+        # # print(device)
+        # for i in range(num_batches):
+        xb = Xtest.to(device)
+        xmb = Xtestmasks.to(device)
+        labels = test_labels.to(device)
 
-            logits = model(xb, xmb)
-            B, T, V = logits.shape
-            
-            loss = F.cross_entropy(
-                logits.view(-1, V), 
-                labels.view(-1), 
-                ignore_index=-100
-            )
+        logits = model(xb, xmb)
+        B, T, V = logits.shape
+        
+        loss = F.cross_entropy(
+            logits.view(-1, V), 
+            labels.view(-1), 
+            ignore_index=-100
+        )
 
-            total_loss += loss.item()
-        print(f"Validation loss : {total_loss/ num_batches}")
+        accuracy = compute_accuracy(torch.argmax(logits, dim = -1), labels, grokking=grokking)
+
+        total_loss += loss.item()
+        return total_loss/num_batches, accuracy
+        #print(f"Validation loss : {total_loss/ num_batches}")
+
+
+def compute_accuracy(predictions, labels, grokking) -> float:
+    mask = labels != -100
+    if mask.sum().item() == 0:
+        return 0.0
+    correct = (predictions == labels) & mask
+    accuracy = correct.sum().float() / mask.sum()
+    if (grokking):
+        correct_per_seq = correct.sum(dim=1) 
+        mask_per_seq = mask.sum(dim=1)        
+        perfect_sequences = (correct_per_seq == mask_per_seq).float()
+        return perfect_sequences.mean().item()
+    return accuracy.item()
 
 
 def inference(model, tokenizer, input_str, max_new_tokens=50, device='cpu'):
