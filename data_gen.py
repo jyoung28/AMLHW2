@@ -25,9 +25,9 @@ def gen_grok_data(p_list, train_split, a=True, s=True, d= True):
                     subtract.append(f"{j} - {i} = {c}") # j >= i, original paper did have negatives
 
                 if (d and i % p != 0):
-                    division.append(f"{j} / {i} = { j * (i**(p-2))%p}") # works for prime p
+                    division.append(f"{j} / {i} = {j * pow(i, p - 2, p) % p}") # works for prime p
                 if (d and j % p != 0):
-                    division.append(f"{i} / {j} = {i * (j**(p-2))%p}")
+                    division.append(f"{i} / {j} = {i * pow(j, p - 2, p) % p}")
 
     # make the train, val, test split
     dataset = add + subtract + division

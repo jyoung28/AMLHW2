@@ -18,7 +18,6 @@ class SanityConfig:
     dropout: float = 0.0
     bias: bool = True  
 
-
 """
 Train function: allows for lots of hyperparams, tokenize before 
 """
@@ -27,17 +26,26 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
     model.to(device)
     mask_idxs = []
     test_mask_idxs= []
-    # print(X)
-    # print(Xtest)
+    
     if (grokking):
         for i in range(len(X)):
             mask_idxs.append(X[i].index('=') + 1) # space after the equal
 
-    print(len(X[0]))
     X = tokenizer(X, padding=True, truncation=True,return_tensors="pt")
     Xtrain = X['input_ids'].to(device)
     Xmasks = X['attention_mask'].to(device)
+    
+    train_labels = Xtrain.clone()
+    train_labels[:, :-1] = Xtrain[:, 1:]  # Shift left
+    train_labels[:, -1] = -100 
+    
+    if (grokking):
+        for idx in range(len(mask_idxs)):
+            train_labels[idx, :mask_idxs[idx] + 1] = -100 # mask everything but the output
 
+    train_labels[Xtrain == tokenizer.pad_token] = -100 
+
+    test_labels = None
     if (Xtest is not None):
         if (grokking):
             for i in range(len(Xtest)):
@@ -45,6 +53,15 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
         Xtest_tokenized = tokenizer(Xtest, padding=True, truncation=True,return_tensors="pt")
         Xtest = Xtest_tokenized['input_ids'].to(device)
         Xtestmasks = Xtest_tokenized['attention_mask'].to(device)
+
+        test_labels = Xtest.clone()
+        test_labels[:, :-1] = Xtest[:, 1:]  # Shift left
+        test_labels[:, -1] = -100        # Ignore last token
+
+        # grokking, ignore all output for the loss except past the  = sign
+        if (len(test_mask_idxs) > 0):
+            for idx in range(len(test_mask_idxs)):
+                test_labels[idx, :test_mask_idxs[idx] + 1] = -100
         
 
     optimizer = model.configure_optimizers(weight_decay, lr, betas, device)
@@ -56,24 +73,7 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
         for i in range(num_batches):
             xb = Xtrain[i*batch_size:(i+1)*batch_size].to(device)
             xmb = Xmasks[i*batch_size:(i+1)*batch_size].to(device)
-
-
-            labels = xb.clone()
-            labels[:, :-1] = xb[:, 1:]  # Shift left
-            labels[:, -1] = -100        # Ignore last token
-
-            # grokking, ignore all output for the loss except past the  = sign
-            if (grokking):
-                masks = mask_idxs[i*batch_size:(i+1)*batch_size]
-                for idx in range(len(masks)):
-                    labels[idx, :masks[idx] + 1] = -100 # mask everything but the output
-
-            labels[xmb == tokenizer.pad_token] = -100 
-            
-            # labels = labels[:,1:]
-            # pad = torch.ones((labels.size(0),1), dtype=labels.dtype, device=labels.device) * -100
-            # labels = torch.cat((labels, pad), dim=1)
-            # labels[labels==tokenizer.pad_token] = -100
+            labels = train_labels[i*batch_size:(i+1)*batch_size].to(device)
 
             logits = model(xb, xmb)
             B, T, V = logits.shape
@@ -89,19 +89,19 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
             optimizer.step()
             avg_loss += loss.item()
             steps += 1
-            if (steps >= max_steps):
+            if (max_steps is not None and steps >= max_steps):
                 print("Reached Max Optimizer Steps")
                 torch.save(model.state_dict(), 'GPT_weights.pth')
                 return model
 
-        print(f"Epoch {e}: Average loss: {avg_loss/ num_batches}")
         if (e % 100 == 0 and Xtest is not None):
-                evaluate(model, Xtest, Xtestmasks, test_mask_idxs)
+                print(f"Epoch {e}: Average loss: {avg_loss/ num_batches}")
+                evaluate(model, Xtest, Xtestmasks, test_labels)
 
     torch.save(model.state_dict(), 'GPT_weights.pth')
     return model
 
-def evaluate(model,  Xtest, Xtestmasks, test_mask_idxs, test_batch_size=128, device='cpu'):
+def evaluate(model,  Xtest, Xtestmasks, test_labels, test_batch_size=128, device='cpu'):
     with torch.no_grad():
         model.eval()
         num_batches = math.ceil(Xtest.shape[0]/test_batch_size)
@@ -109,16 +109,8 @@ def evaluate(model,  Xtest, Xtestmasks, test_mask_idxs, test_batch_size=128, dev
         for i in range(num_batches):
             xb = Xtest[i*test_batch_size:(i+1)*test_batch_size].to(device)
             xmb = Xtestmasks[i*test_batch_size:(i+1)*test_batch_size].to(device)
+            labels = test_labels[i*test_batch_size:(i+1)*test_batch_size].to(device)
 
-            labels = xb.clone()
-            labels[:, :-1] = xb[:, 1:]  # Shift left
-            labels[:, -1] = -100        # Ignore last token
-
-            # grokking, ignore all output for the loss except past the  = sign
-            if (len(test_mask_idxs) > 0):
-                masks = test_mask_idxs[i*test_batch_size:(i+1)*test_batch_size]
-                for idx in range(len(masks)):
-                    labels[idx, :masks[idx] + 1] = -100
             logits = model(xb, xmb)
             B, T, V = logits.shape
             
