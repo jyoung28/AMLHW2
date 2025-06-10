@@ -22,10 +22,13 @@ class SanityConfig:
 """
 Train function: allows for lots of hyperparams, tokenize before 
 """
-def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu', grokking=False):
+def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu', grokking=False, max_steps=None):
     model = GPT(config)
     model.to(device)
     mask_idxs = []
+    test_mask_idxs= []
+    # print(X)
+    # print(Xtest)
     if (grokking):
         for i in range(len(X)):
             mask_idxs.append(X[i].index('=') + 1) # space after the equal
@@ -34,9 +37,19 @@ def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_de
     X = tokenizer(X, padding=True, truncation=True,return_tensors="pt")
     Xtrain = X['input_ids'].to(device)
     Xmasks = X['attention_mask'].to(device)
+
+    if (Xtest is not None):
+        if (grokking):
+            for i in range(len(Xtest)):
+                test_mask_idxs.append(Xtest[i].index('=') + 1)
+        Xtest_tokenized = tokenizer(Xtest, padding=True, truncation=True,return_tensors="pt")
+        Xtest = Xtest_tokenized['input_ids'].to(device)
+        Xtestmasks = Xtest_tokenized['attention_mask'].to(device)
+        
+
     optimizer = model.configure_optimizers(weight_decay, lr, betas, device)
     num_batches = math.ceil(Xtrain.shape[0]/batch_size)
-    
+    steps = 0
     
     for e in range(epochs):
         avg_loss = 0
@@ -75,10 +88,48 @@ def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_de
             loss.backward()
             optimizer.step()
             avg_loss += loss.item()
+            steps += 1
+            if (steps >= max_steps):
+                print("Reached Max Optimizer Steps")
+                torch.save(model.state_dict(), 'GPT_weights.pth')
+                return model
+
         print(f"Epoch {e}: Average loss: {avg_loss/ num_batches}")
+        if (e % 100 == 0 and Xtest is not None):
+                evaluate(model, Xtest, Xtestmasks, test_mask_idxs)
 
     torch.save(model.state_dict(), 'GPT_weights.pth')
     return model
+
+def evaluate(model,  Xtest, Xtestmasks, test_mask_idxs, test_batch_size=128, device='cpu'):
+    with torch.no_grad():
+        model.eval()
+        num_batches = math.ceil(Xtest.shape[0]/test_batch_size)
+        total_loss = 0
+        for i in range(num_batches):
+            xb = Xtest[i*test_batch_size:(i+1)*test_batch_size].to(device)
+            xmb = Xtestmasks[i*test_batch_size:(i+1)*test_batch_size].to(device)
+
+            labels = xb.clone()
+            labels[:, :-1] = xb[:, 1:]  # Shift left
+            labels[:, -1] = -100        # Ignore last token
+
+            # grokking, ignore all output for the loss except past the  = sign
+            if (len(test_mask_idxs) > 0):
+                masks = test_mask_idxs[i*test_batch_size:(i+1)*test_batch_size]
+                for idx in range(len(masks)):
+                    labels[idx, :masks[idx] + 1] = -100
+            logits = model(xb, xmb)
+            B, T, V = logits.shape
+            
+            loss = F.cross_entropy(
+                logits.view(-1, V), 
+                labels.view(-1), 
+                ignore_index=-100
+            )
+
+            total_loss += loss.item()
+        print(f"Validation loss : {total_loss/ num_batches}")
 
 
 def inference(model, tokenizer, input_str, max_new_tokens=50, device='cpu'):
@@ -126,15 +177,15 @@ def inference(model, tokenizer, input_str, max_new_tokens=50, device='cpu'):
 
 
 
-config = SanityConfig()
-# tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
-# config.vocab_size = tokenizer.vocab_size
-tokenizer = AutoTokenizer.from_pretrained('google/byt5-base')
+# config = SanityConfig()
+# # tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
+# # config.vocab_size = tokenizer.vocab_size
+# tokenizer = AutoTokenizer.from_pretrained('google/byt5-base')
 
-tokenizer.pad_token = tokenizer.eos_token 
-# special_tokens_dict = {'additional_special_tokens': ['<|startoftext|>']}
-# tokenizer.add_special_tokens(special_tokens_dict)
-print("Starting Training... ")
-device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = trainGPT(config, tokenizer, ["I love machine learning"], device=device)
-print(inference(model, tokenizer, ["I "]))
+# tokenizer.pad_token = tokenizer.eos_token 
+# # special_tokens_dict = {'additional_special_tokens': ['<|startoftext|>']}
+# # tokenizer.add_special_tokens(special_tokens_dict)
+# print("Starting Training... ")
+# device = 'cuda' if torch.cuda.is_available() else 'cpu'
+# model = trainGPT(config, tokenizer, ["I love machine learning"], device=device)
+# print(inference(model, tokenizer, ["I "]))

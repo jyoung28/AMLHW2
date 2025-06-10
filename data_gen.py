@@ -25,7 +25,7 @@ def gen_grok_data(p_list, train_split, a=True, s=True, d= True):
                     subtract.append(f"{j} - {i} = {c}") # j >= i, original paper did have negatives
 
                 if (d and i % p != 0):
-                    division.append(f"{j} / {i} ={ j * (i**(p-2))%p}") # works for prime p
+                    division.append(f"{j} / {i} = { j * (i**(p-2))%p}") # works for prime p
                 if (d and j % p != 0):
                     division.append(f"{i} / {j} = {i * (j**(p-2))%p}")
 
@@ -42,9 +42,4 @@ def gen_grok_data(p_list, train_split, a=True, s=True, d= True):
     with open('test.txt', 'w') as f:
         for l in test:
             f.write(f"{l}\n")
-
-gen_grok_data([5], 1)
-
-
-
-
+    return train, test
