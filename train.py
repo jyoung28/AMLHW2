@@ -22,14 +22,21 @@ class SanityConfig:
 """
 Train function: allows for lots of hyperparams, tokenize before 
 """
-def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu'):
+def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_decay=1e-2, betas=[0.9, 0.999], device='cpu', grokking=False):
     model = GPT(config)
     model.to(device)
+    mask_idxs = []
+    if (grokking):
+        for i in range(len(X)):
+            mask_idxs.append(X[i].index('=') + 1) # space after the equal
+
+    print(len(X[0]))
     X = tokenizer(X, padding=True, truncation=True,return_tensors="pt")
     Xtrain = X['input_ids'].to(device)
     Xmasks = X['attention_mask'].to(device)
     optimizer = model.configure_optimizers(weight_decay, lr, betas, device)
     num_batches = math.ceil(Xtrain.shape[0]/batch_size)
+    
     
     for e in range(epochs):
         avg_loss = 0
@@ -37,9 +44,17 @@ def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_de
             xb = Xtrain[i*batch_size:(i+1)*batch_size].to(device)
             xmb = Xmasks[i*batch_size:(i+1)*batch_size].to(device)
 
+
             labels = xb.clone()
             labels[:, :-1] = xb[:, 1:]  # Shift left
             labels[:, -1] = -100        # Ignore last token
+
+            # grokking, ignore all output for the loss except past the  = sign
+            if (grokking):
+                masks = mask_idxs[i*batch_size:(i+1)*batch_size]
+                for idx in range(len(masks)):
+                    labels[idx, :masks[idx] + 1] = -100 # mask everything but the output
+
             labels[xmb == tokenizer.pad_token] = -100 
             
             # labels = labels[:,1:]
