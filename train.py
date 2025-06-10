@@ -34,13 +34,14 @@ def trainGPT(config, tokenizer, X, batch_size=128, epochs=50, lr=1e-3, weight_de
     for e in range(epochs):
         avg_loss = 0
         for i in range(num_batches):
-            xb = Xtrain[i*batch_size:(i+1)*batch_size]
-            xmb = Xmasks[i*batch_size:(i+1)*batch_size]
+            xb = Xtrain[i*batch_size:(i+1)*batch_size].to(device)
+            xmb = Xmasks[i*batch_size:(i+1)*batch_size].to(device)
 
             labels = xb.clone()
             labels[:, :-1] = xb[:, 1:]  # Shift left
             labels[:, -1] = -100        # Ignore last token
             labels[xmb == tokenizer.pad_token] = -100 
+            
             # labels = labels[:,1:]
             # pad = torch.ones((labels.size(0),1), dtype=labels.dtype, device=labels.device) * -100
             # labels = torch.cat((labels, pad), dim=1)
@@ -71,7 +72,9 @@ def inference(model, tokenizer, input_str, max_new_tokens=50, device='cpu'):
         model.eval()
 
         # Tokenize input
-        inputs = tokenizer(input_str, return_tensors='pt', padding=True, truncation=True)
+        inputs = tokenizer(input_str, return_tensors='pt', add_special_tokens=False)
+        print(inputs['input_ids'])
+        print(tokenizer.encode(tokenizer.eos_token))
         input_ids = inputs['input_ids'].to(device)
         attention_mask = inputs['attention_mask'].to(device)
 
@@ -89,7 +92,7 @@ def inference(model, tokenizer, input_str, max_new_tokens=50, device='cpu'):
 
             # Get predicted next token (greedy)
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
-            print(tokenizer.decode([next_token.item()], skip_special_tokens=True))
+            # print(tokenizer.decode([next_token.item()], skip_special_tokens=True))
 
             # Append to generated sequence
             generated = torch.cat((generated, next_token), dim=1)
@@ -111,9 +114,12 @@ def inference(model, tokenizer, input_str, max_new_tokens=50, device='cpu'):
 config = SanityConfig()
 # tokenizer = AutoTokenizer.from_pretrained('bert-base-uncased')
 # config.vocab_size = tokenizer.vocab_size
-tokenizer = AutoTokenizer.from_pretrained('gpt2')
+tokenizer = AutoTokenizer.from_pretrained('google/byt5-base')
+
 tokenizer.pad_token = tokenizer.eos_token 
+# special_tokens_dict = {'additional_special_tokens': ['<|startoftext|>']}
+# tokenizer.add_special_tokens(special_tokens_dict)
 print("Starting Training... ")
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-model = trainGPT(config, tokenizer, ["I love machine learning!<|endoftext|>"], device=device)
-print(inference(model, tokenizer, "I lo"))
+model = trainGPT(config, tokenizer, ["I love machine learning"], device=device)
+print(inference(model, tokenizer, ["I "]))
