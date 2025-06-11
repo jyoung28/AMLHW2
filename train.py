@@ -93,7 +93,6 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
             predictions = torch.argmax(logits, dim = -1)
             all_predictions += [predictions]
             all_labels += [labels]
-
             loss = F.cross_entropy(
                 logits.view(-1, V), 
                 labels.view(-1), 
@@ -143,6 +142,13 @@ def trainGPT(config, tokenizer, X, Xtest=None, batch_size=128, epochs=50, lr=1e-
             progress_bar.set_postfix_str(
             f"loss={avg_loss / num_batches}, train_acc={train_accuracy}, "
             f"val_loss={validation_loss}, val_acc={validation_accuracy}, step={steps}")
+        # validation_loss, validation_accuracy = evaluate(model, Xtest, Xtestmasks, test_labels, test_batch_size = 8192, device=device, grokking=grokking)
+        # test_accuracies.append(validation_accuracy)
+        # all_valid_loss.append(validation_loss)
+        # progress_bar.update(num_batches)
+        # progress_bar.set_postfix_str(
+        # f"loss={avg_loss / num_batches}, train_acc={train_accuracy}, "
+        # f"val_loss={validation_loss}, val_acc={validation_accuracy}, step={steps}")
 
 
 
